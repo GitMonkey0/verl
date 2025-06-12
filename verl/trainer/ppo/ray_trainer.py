@@ -344,6 +344,7 @@ class RayPPOTrainer:
 
         self._validate_config()
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+        self.train_dataset = train_dataset
 
     def _validate_config(self):
         config = self.config
@@ -874,6 +875,9 @@ class RayPPOTrainer:
         global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix)
         metrics.update(global_balance_stats)
 
+    def rag_choice(self):
+        return 
+
     def fit(self):
         """
         The training loop of PPO.
@@ -915,7 +919,9 @@ class RayPPOTrainer:
         last_val_metrics = None
 
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            reward_tensor = None
+            for batch_dict in self.rag_choice(reward_tensor):
+            # for batch_dict in self.train_dataloader:
                 metrics = {}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
