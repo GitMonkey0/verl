@@ -972,8 +972,8 @@ class RayPPOTrainer:
             if not hasattr(self, "used_indices"):
                 self.used_indices = set()
             self.used_indices.clear()
-            for batch_dict in self.rag_choice(reward_tensor):
-            # for batch_dict in self.train_dataloader:
+            while len(self.used_indices) < len(self.train_dataset):
+                batch_dict = self.rag_choice(reward_tensor)
                 metrics = {}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
