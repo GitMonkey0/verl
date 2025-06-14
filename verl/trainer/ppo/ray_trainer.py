@@ -17,7 +17,7 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
-
+import random
 import json
 import os
 import uuid
@@ -344,6 +344,12 @@ class RayPPOTrainer:
 
         self._validate_config()
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+        self.train_dataset = train_dataset
+        self.collate_fn = collate_fn
+        with open("emb.json", "r") as f:
+            embedding_list = json.load(f)  # List[List[float]]
+
+        self.sample_embeddings = [torch.tensor(e, dtype=torch.float32) for e in embedding_list]
 
     def _validate_config(self):
         config = self.config
@@ -874,6 +880,54 @@ class RayPPOTrainer:
         global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix)
         metrics.update(global_balance_stats)
 
+    def rag_choice(self, reward_tensor):
+        n = self.config.actor_rollout_ref.rollout.n
+        batch_size = self.config.data.train_batch_size
+        total_data_size = len(self.train_dataset)
+
+        # 首轮：随机选 batch（排除已选）
+        if reward_tensor is None:
+            available_indices = list(set(range(total_data_size)) - self.used_indices)
+            init_indices = random.sample(available_indices, batch_size)
+            self.last_selected_indices = init_indices
+            self.used_indices.update(init_indices)
+
+            _batch = [self.train_dataset[i] for i in init_indices]
+            return self.collate_fn(_batch)
+
+        # 后续轮次：从 reward_tensor 计算正确率和不确定性权重
+        has_one = (reward_tensor == 1.0).any(dim=1)
+        grouped = has_one.view(batch_size, n)
+        correct_rate = grouped.float().mean(dim=1)  # (batch_size,)
+        uncertainty_weights = 1.0 - torch.abs(correct_rate - 0.5) * 2  # 映射到 [0,1]，越接近0.5越大
+
+        # 获取本 batch 中样本 embedding 和权重
+        selected_ids = self.last_selected_indices
+        selected_embs = torch.stack([self.sample_embeddings[i] for i in selected_ids], dim=0)  # (batch_size, d)
+        weights = uncertainty_weights.view(-1, 1)  # (batch_size, 1)
+
+        # 加权平均生成一个 query embedding（或多个也可以）
+        weighted_query = torch.sum(selected_embs * weights, dim=0) / (weights.sum() + 1e-8)  # (d,)
+        weighted_query = torch.nn.functional.normalize(weighted_query, dim=0)  # 归一化
+
+        # 对所有样本计算相似度
+        all_embs = torch.stack(self.sample_embeddings, dim=0)  # (total_data_size, d)
+        all_norm = torch.nn.functional.normalize(all_embs, dim=1)
+        sim = torch.matmul(all_norm, weighted_query)  # (total_data_size,)
+
+        # 屏蔽已经选中过的样本
+        sim_mask = torch.ones(total_data_size, dtype=torch.bool)
+        sim_mask[list(self.used_indices)] = False
+        sim[~sim_mask] = float('-inf')
+
+        # 选出 top-k 最相似的样本作为下一个 batch
+        top_indices = torch.topk(sim, k=batch_size).indices.tolist()
+        self.last_selected_indices = top_indices
+        self.used_indices.update(top_indices)
+
+        _batch = [self.train_dataset[i] for i in top_indices]
+        return self.collate_fn(_batch)
+
     def fit(self):
         """
         The training loop of PPO.
@@ -913,9 +967,13 @@ class RayPPOTrainer:
         # we start from step 1
         self.global_steps += 1
         last_val_metrics = None
-
+        reward_tensor = None
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            if not hasattr(self, "used_indices"):
+                self.used_indices = set()
+            self.used_indices.clear()
+            for batch_dict in self.rag_choice(reward_tensor):
+            # for batch_dict in self.train_dataloader:
                 metrics = {}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
