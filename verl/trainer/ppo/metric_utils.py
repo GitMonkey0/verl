@@ -379,12 +379,18 @@ def process_validation_metrics(data_sources: list[str], sample_inputs: list[str]
                 if isinstance(var_vals[0], str):
                     continue
 
+                filtered_pairs = [(val, pred) for val, pred in zip(var_vals, var2vals.get("pred", [None] * len(var_vals))) if val is not None]
+                if not filtered_pairs:
+                    continue
+
+                filtered_vals = [val for val, _ in filtered_pairs]
+
                 metric = {}
-                n_resps = len(var_vals)
-                metric[f"mean@{n_resps}"] = np.mean(var_vals)
+                n_resps = len(filtered_vals)
+                metric[f"mean@{n_resps}"] = np.mean(filtered_vals)
 
                 if n_resps > 1:
-                    metric[f"std@{n_resps}"] = np.std(var_vals)
+                    metric[f"std@{n_resps}"] = np.std(filtered_vals)
 
                     ns = []
                     n = 2
@@ -394,11 +400,13 @@ def process_validation_metrics(data_sources: list[str], sample_inputs: list[str]
                     ns.append(n_resps)
 
                     for n in ns:
-                        [(bon_mean, bon_std), (won_mean, won_std)] = bootstrap_metric(data=var_vals, subset_size=n, reduce_fns=[np.max, np.min], seed=seed)
+                        [(bon_mean, bon_std), (won_mean, won_std)] = bootstrap_metric(
+                            data=filtered_vals, subset_size=n, reduce_fns=[np.max, np.min], seed=seed
+                        )
                         metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
                         metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
                         if var2vals.get("pred", None) is not None:
-                            vote_data = [{"val": val, "pred": pred} for val, pred in zip(var_vals, var2vals["pred"])]
+                            vote_data = [{"val": val, "pred": pred} for val, pred in filtered_pairs if pred is not None]
                             [(maj_n_mean, maj_n_std)] = bootstrap_metric(
                                 data=vote_data,
                                 subset_size=n,
